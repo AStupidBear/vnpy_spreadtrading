@@ -8,7 +8,7 @@ from vnpy.trader.object import (
 from vnpy.trader.constant import Direction, Status, Offset, Interval
 from vnpy.trader.utility import virtual, floor_to, ceil_to, round_to
 
-from .base import SpreadData
+from .base import SpreadData, calculate_inverse_volume
 
 if TYPE_CHECKING:
     from .engine import SpreadAlgoEngine, SpreadStrategyEngine
@@ -128,6 +128,37 @@ class SpreadAlgoTemplate:
             self.write_log("算法已停止")
             self.put_event()
 
+    def check_algo_finished(self) -> bool:
+        """"""
+        finished = True
+
+        for vt_symbol, leg in self.spread.legs.items():
+            leg_traded = self.leg_traded[vt_symbol]
+
+            trading_multiplier = self.spread.trading_multipliers[vt_symbol]
+            size = self.spread.get_leg_size(vt_symbol)
+
+            if self.spread.is_inverse(vt_symbol):
+                leg_target = calculate_inverse_volume(
+                    self.target * trading_multiplier,
+                    leg.last_price,
+                    size
+                )
+                min_change = calculate_inverse_volume(
+                    leg.min_volume,
+                    leg.last_price,
+                    size
+                )
+            else:
+                leg_target = self.target * trading_multiplier
+                min_change = leg.min_volume
+
+            leg_left = leg_target - leg_traded
+            if abs(leg_left) >= min_change:
+                finished = False
+
+        return finished
+
     def stop(self):
         """"""
         if not self.is_active():
@@ -145,7 +176,18 @@ class SpreadAlgoTemplate:
 
     def update_trade(self, trade: TradeData):
         """"""
-        trade_volume = trade.volume
+        # For inverse contract:
+        # record coin trading volume as leg trading volume,
+        # not contract volume!
+        if self.spread.is_inverse(trade.vt_symbol):
+            size = self.spread.get_leg_size(trade.vt_symbol)
+            trade_volume = calculate_inverse_volume(
+                trade.volume,
+                trade.price,
+                size
+            )
+        else:
+            trade_volume = trade.volume
 
         if trade.direction == Direction.LONG:
             self.leg_traded[trade.vt_symbol] += trade_volume
@@ -236,6 +278,15 @@ class SpreadAlgoTemplate:
         # 如果已经进入停止任务，禁止主动腿发单
         if self.stopped and vt_symbol == self.spread.active_leg.vt_symbol:
             return
+        # For inverse contract:
+        # calculate contract trading volume from coin trading volume
+        if self.spread.is_inverse(vt_symbol):
+            size = self.spread.get_leg_size(vt_symbol)
+            if self.offset == Offset.CLOSE:
+                leg = self.spread.legs[vt_symbol]
+                volume = volume * leg.net_pos_price / size
+            else:
+                volume = volume * price / size
 
         # Round order volume to min_volume of contract
         leg = self.spread.legs[vt_symbol]
